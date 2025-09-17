@@ -1,0 +1,74 @@
+name: "macos-all"
+
+runs:
+  using: composite
+  steps:
+    - name: Code checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        brew install nasm
+        
+        mkdir -p $GITHUB_WORKSPACE/static_x64/lib
+        mkdir -p $GITHUB_WORKSPACE/dynamic_x64/lib
+        mkdir -p $GITHUB_WORKSPACE/static_arm64/lib
+        mkdir -p $GITHUB_WORKSPACE/dynamic_arm64/lib
+
+    - name: Install vcpkg
+      shell: bash
+      run: |
+        git clone https://github.com/microsoft/vcpkg builder
+        ./builder/bootstrap-vcpkg.sh
+
+    - name: Build libwebp
+      shell: bash
+      run: |
+        ./builder/vcpkg install "libwebp:x64-osx"
+        ./builder/vcpkg install "libwebp:x64-osx-dynamic"
+        
+        ./builder/vcpkg install "libwebp:arm64-osx"
+        ./builder/vcpkg install "libwebp:arm64-osx-dynamic"
+
+    - name: Prepare dependencies
+      shell: bash
+      run: |
+        cp -r $GITHUB_WORKSPACE/builder/installed/x64-osx/include/webp $GITHUB_WORKSPACE/static_x64/include
+        cp $GITHUB_WORKSPACE/builder/installed/x64-osx/lib/*.a $GITHUB_WORKSPACE/static_x64/lib
+        
+        cp -r $GITHUB_WORKSPACE/builder/installed/arm64-osx/include/webp $GITHUB_WORKSPACE/static_arm64/include
+        cp $GITHUB_WORKSPACE/builder/installed/arm64-osx/lib/*.a $GITHUB_WORKSPACE/static_arm64/lib
+        
+        cp -r $GITHUB_WORKSPACE/builder/installed/x64-osx-dynamic/include/webp $GITHUB_WORKSPACE/dynamic_x64/include
+        find $GITHUB_WORKSPACE/builder/installed/x64-osx-dynamic/lib -maxdepth 1 -type f -name "*.dylib" \
+          -exec cp {} $GITHUB_WORKSPACE/dynamic_x64/lib \;
+        for f in $GITHUB_WORKSPACE/dynamic_x64/lib/*.dylib; \
+          do new=$(echo "$f" | sed -E 's/\.[0-9]+(\.[0-9]+)*\.dylib$/.dylib/'); mv "$f" "$new"; done
+        
+        cp -r $GITHUB_WORKSPACE/builder/installed/arm64-osx-dynamic/include/webp $GITHUB_WORKSPACE/dynamic_arm64/include
+        find $GITHUB_WORKSPACE/builder/installed/arm64-osx-dynamic/lib -maxdepth 1 -type f -name "*.dylib" \
+          -exec cp {} $GITHUB_WORKSPACE/dynamic_arm64/lib \;
+        for f in $GITHUB_WORKSPACE/dynamic_arm64/lib/*.dylib; \
+          do new=$(echo "$f" | sed -E 's/\.[0-9]+(\.[0-9]+)*\.dylib$/.dylib/'); mv "$f" "$new"; done
+
+    - name: Zip local
+      shell: bash
+      run: |
+        cd $GITHUB_WORKSPACE/static_x64
+        7z a -tzip -mx=9 $GITHUB_WORKSPACE/static_osx_x64.zip include lib
+        
+        cd $GITHUB_WORKSPACE/static_arm64
+        7z a -tzip -mx=9 $GITHUB_WORKSPACE/static_osx_arm64.zip include lib
+        
+        cd $GITHUB_WORKSPACE/dynamic_x64
+        7z a -tzip -mx=9 $GITHUB_WORKSPACE/dynamic_osx_x64.zip include lib
+        
+        cd $GITHUB_WORKSPACE/dynamic_arm64
+        7z a -tzip -mx=9 $GITHUB_WORKSPACE/dynamic_osx_arm64.zip include lib
+
+    - name: Save artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries-darwin
+        path: "*.zip"

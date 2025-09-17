@@ -42,12 +42,16 @@ runs:
     - name: Prepare dependencies
       shell: bash
       run: |
-        cp -r $GITHUB_WORKSPACE/builder/installed/arm64-mingw-static/include/webp/* $GITHUB_WORKSPACE/static_arm64/include
+        cp -r $GITHUB_WORKSPACE/builder/installed/arm64-mingw-static/include/webp $GITHUB_WORKSPACE/static_arm64
+        mv $GITHUB_WORKSPACE/static_arm64/webp $GITHUB_WORKSPACE/static_arm64/include
+
         for file in "$GITHUB_WORKSPACE"/builder/installed/arm64-mingw-static/lib/*.a; do
           cp "$file" "$GITHUB_WORKSPACE/static_arm64/lib/"
         done
         
-        cp -r $GITHUB_WORKSPACE/builder/installed/arm64-mingw-dynamic/include/webp/* $GITHUB_WORKSPACE/dynamic_arm64/include
+        cp -r $GITHUB_WORKSPACE/builder/installed/arm64-mingw-dynamic/include/webp $GITHUB_WORKSPACE/dynamic_arm64
+        mv $GITHUB_WORKSPACE/dynamic_arm64/webp $GITHUB_WORKSPACE/dynamic_arm64/include
+        
         for file in "$GITHUB_WORKSPACE"/builder/installed/arm64-mingw-dynamic/bin/*.dll; do
           cp "$file" "$GITHUB_WORKSPACE/dynamic_arm64/lib/"
         done

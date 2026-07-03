@@ -1,0 +1,79 @@
+name: "macos"
+
+# Pinned upstream versions — bump these to upgrade.
+# vcpkg release tag: 2026.06.01
+
+inputs:
+  arch:
+    description: "Target architecture suffix (e.g. x64, arm64)"
+    required: true
+  triplet:
+    description: "vcpkg static triplet (e.g. x64-osx); the dynamic triplet is derived as <triplet>-dynamic"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        brew install nasm
+        mkdir -p $GITHUB_WORKSPACE/static_${{ inputs.arch }}/lib
+        mkdir -p $GITHUB_WORKSPACE/dynamic_${{ inputs.arch }}/lib
+        mkdir -p $GITHUB_WORKSPACE/vcpkg_cache
+
+    - name: Cache vcpkg binaries
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/vcpkg_cache
+        key: vcpkg-${{ runner.os }}-${{ inputs.triplet }}-2026.06.01
+
+    - name: Install vcpkg
+      shell: bash
+      run: |
+        git clone --depth 1 --branch 2026.06.01 https://github.com/microsoft/vcpkg builder
+        ./builder/bootstrap-vcpkg.sh
+
+    - name: Build libwebp
+      shell: bash
+      env:
+        VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg_cache
+      run: |
+        # x64 is cross-compiled on the arm64 runner; the x64-osx triplet sets
+        # VCPKG_OSX_ARCHITECTURES=x86_64, so no extra flags are needed.
+        ./builder/vcpkg install "libwebp:${{ inputs.triplet }}"
+        ./builder/vcpkg install "libwebp:${{ inputs.triplet }}-dynamic"
+
+    - name: Prepare dependencies
+      shell: bash
+      run: |
+        cp -r $GITHUB_WORKSPACE/builder/installed/${{ inputs.triplet }}/include/webp $GITHUB_WORKSPACE/static_${{ inputs.arch }}/include
+        cp $GITHUB_WORKSPACE/builder/installed/${{ inputs.triplet }}/lib/*.a $GITHUB_WORKSPACE/static_${{ inputs.arch }}/lib
+
+        cp -r $GITHUB_WORKSPACE/builder/installed/${{ inputs.triplet }}-dynamic/include/webp $GITHUB_WORKSPACE/dynamic_${{ inputs.arch }}/include
+        # cp -a preserves the versioned .dylib symlinks as links rather than copies.
+        cp -a $GITHUB_WORKSPACE/builder/installed/${{ inputs.triplet }}-dynamic/lib/*.dylib* $GITHUB_WORKSPACE/dynamic_${{ inputs.arch }}/lib
+
+    - name: Strip debug info
+      shell: bash
+      run: |
+        # Strip DWARF debug info from the static .a files (it's the bulk of their
+        # size and is not needed to link against them). -S removes debug symbols
+        # while keeping the symbol table, so the libraries still link.
+        strip -S $GITHUB_WORKSPACE/static_${{ inputs.arch }}/lib/*.a
+
+    - name: Zip local
+      shell: bash
+      run: |
+        cd $GITHUB_WORKSPACE/static_${{ inputs.arch }}
+        7z a -tzip -mx=9 -snl $GITHUB_WORKSPACE/static_osx_${{ inputs.arch }}.zip include lib
+
+        cd $GITHUB_WORKSPACE/dynamic_${{ inputs.arch }}
+        # -snl: store the .dylib symlinks as links rather than duplicating them.
+        7z a -tzip -mx=9 -snl $GITHUB_WORKSPACE/dynamic_osx_${{ inputs.arch }}.zip include lib
+
+    - name: Save artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries-osx-${{ inputs.arch }}
+        path: "*.zip"

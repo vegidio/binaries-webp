@@ -1,0 +1,105 @@
+name: "mingw"
+
+# Pinned upstream versions — bump these to upgrade.
+# vcpkg release tag: 2026.06.01
+
+inputs:
+  arch:
+    description: "Target architecture suffix (e.g. x64, arm64)"
+    required: true
+  msystem:
+    description: "MSYS2 environment (e.g. MINGW64, CLANGARM64)"
+    required: true
+  packages:
+    description: "MSYS2 packages to install (newline-separated)"
+    required: true
+  triplet-prefix:
+    description: "vcpkg triplet prefix (e.g. x64-mingw); -static and -dynamic are derived from it"
+    required: true
+  cmake-url:
+    description: "Optional MSYS2 CMake package URL to pin (used to work around CLANGARM64 CMake regressions); leave empty to skip"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install NASM
+      uses: ilammy/setup-nasm@v1
+
+    - name: Install MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: ${{ inputs.msystem }}
+        update: true
+        install: ${{ inputs.packages }}
+
+    - name: Pin CMake
+      if: inputs.cmake-url != ''
+      shell: msys2 {0}
+      run: |
+        # CLANGARM64 ships a CMake that regresses the libwebp vcpkg build, so pin a
+        # known-good package explicitly. x64 leaves cmake-url empty and skips this.
+        curl -L -o cmake-pin.pkg.tar.zst "${{ inputs.cmake-url }}"
+        pacman -U --noconfirm cmake-pin.pkg.tar.zst
+
+    - name: Cache vcpkg binaries
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/vcpkg_cache
+        key: vcpkg-${{ runner.os }}-${{ inputs.triplet-prefix }}-2026.06.01
+
+    - name: Install vcpkg
+      shell: bash
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/static_${{ inputs.arch }}/lib
+        mkdir -p $GITHUB_WORKSPACE/dynamic_${{ inputs.arch }}/lib
+        mkdir -p $GITHUB_WORKSPACE/vcpkg_cache
+        git clone --depth 1 --branch 2026.06.01 https://github.com/microsoft/vcpkg builder
+        ./builder/bootstrap-vcpkg.sh
+
+    - name: Build libwebp
+      shell: msys2 {0}
+      env:
+        MSYS2_PATH_TYPE: inherit
+        VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg_cache
+      run: |
+        ./builder/vcpkg install "libwebp:${{ inputs.triplet-prefix }}-static"
+        ./builder/vcpkg install "libwebp:${{ inputs.triplet-prefix }}-dynamic"
+
+    - name: Prepare dependencies
+      shell: bash
+      run: |
+        cp -r $GITHUB_WORKSPACE/builder/installed/${{ inputs.triplet-prefix }}-static/include/webp $GITHUB_WORKSPACE/static_${{ inputs.arch }}/include
+        for file in "$GITHUB_WORKSPACE"/builder/installed/${{ inputs.triplet-prefix }}-static/lib/*.a; do
+          cp "$file" "$GITHUB_WORKSPACE/static_${{ inputs.arch }}/lib/"
+        done
+
+        cp -r $GITHUB_WORKSPACE/builder/installed/${{ inputs.triplet-prefix }}-dynamic/include/webp $GITHUB_WORKSPACE/dynamic_${{ inputs.arch }}/include
+        for file in "$GITHUB_WORKSPACE"/builder/installed/${{ inputs.triplet-prefix }}-dynamic/bin/*.dll; do
+          cp "$file" "$GITHUB_WORKSPACE/dynamic_${{ inputs.arch }}/lib/"
+        done
+
+    - name: Strip debug info
+      shell: msys2 {0}
+      run: |
+        # Strip DWARF debug info from the static .a files (it's the bulk of their
+        # size and is not needed to link against them). Run under MSYS2 so the
+        # toolchain strip matches the target (GNU strip on MINGW64, llvm-strip on
+        # CLANGARM64); --strip-debug keeps the symbol table, so the libs still link.
+        strip --strip-debug "$GITHUB_WORKSPACE"/static_${{ inputs.arch }}/lib/*.a
+
+    - name: Zip local
+      shell: bash
+      run: |
+        cd $GITHUB_WORKSPACE/static_${{ inputs.arch }}
+        7z a -tzip -mx=9 -snl $GITHUB_WORKSPACE/static_mingw_${{ inputs.arch }}.zip include lib
+
+        cd $GITHUB_WORKSPACE/dynamic_${{ inputs.arch }}
+        7z a -tzip -mx=9 -snl $GITHUB_WORKSPACE/dynamic_mingw_${{ inputs.arch }}.zip include lib
+
+    - name: Save artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries-mingw-${{ inputs.arch }}
+        path: "*.zip"

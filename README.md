@@ -2,7 +2,7 @@
 
 A repository with static and dynamic binaries for libwebp.
 
-It offers x64 & arm64 versions for macOS, Linux and Windows.
+It offers x64 & arm64 versions for macOS, Linux, MinGW and Windows.
 
 ## 👨🏾‍💻 Author
 

@@ -1,0 +1,110 @@
+name: "windows"
+
+# Pinned upstream versions — bump these to upgrade.
+# vcpkg release tag: 2026.06.01
+
+inputs:
+  arch:
+    description: "Target architecture suffix (e.g. x64, arm64)"
+    required: true
+  triplet-prefix:
+    description: "vcpkg triplet prefix (e.g. x64-windows); static is <prefix>-static-md, dynamic is <prefix>"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install NASM
+      uses: ilammy/setup-nasm@v1
+
+    - name: Cache vcpkg binaries
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/vcpkg_cache
+        key: vcpkg-${{ runner.os }}-msvc-${{ inputs.triplet-prefix }}-2026.06.01
+
+    - name: Install vcpkg
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/static_${{ inputs.arch }}/lib" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/dynamic_${{ inputs.arch }}/lib" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/vcpkg_cache" | Out-Null
+        git clone --depth 1 --branch 2026.06.01 https://github.com/microsoft/vcpkg builder
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & ./builder/bootstrap-vcpkg.bat
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Build libwebp
+      shell: pwsh
+      env:
+        VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg_cache
+      run: |
+        $ErrorActionPreference = "Stop"
+        # Static archives use the MSVC static-md triplet (static .lib, dynamic UCRT)
+        # so they link under the default *-pc-windows-msvc target; dynamic uses the
+        # plain triplet (DLLs).
+        foreach ($t in @("${{ inputs.triplet-prefix }}-static-md", "${{ inputs.triplet-prefix }}")) {
+          & ./builder/vcpkg.exe install "libwebp:$t"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+
+    - name: Prepare dependencies
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $st = "builder/installed/${{ inputs.triplet-prefix }}-static-md"
+        $dy = "builder/installed/${{ inputs.triplet-prefix }}"
+        # Static: MSVC .lib files for *-pc-windows-msvc consumers.
+        Copy-Item -Recurse -Force "$st/include/webp" "static_${{ inputs.arch }}/include"
+        Copy-Item -Force "$st/lib/*.lib" "static_${{ inputs.arch }}/lib/"
+        # Dynamic: DLLs + their import libs (needed to link against the DLLs).
+        Copy-Item -Recurse -Force "$dy/include/webp" "dynamic_${{ inputs.arch }}/include"
+        Copy-Item -Force "$dy/bin/*.dll" "dynamic_${{ inputs.arch }}/lib/"
+        Copy-Item -Force "$dy/lib/*.lib" "dynamic_${{ inputs.arch }}/lib/"
+
+    - name: Strip debug info from libs
+      shell: pwsh
+      run: |
+        # Strip the CodeView debug info from the static .lib files — it's the bulk
+        # of their size and isn't needed to link against them. --strip-debug removes
+        # only debug sections, keeping the symbol table so the libraries still link.
+        # Only the static set is stripped: the dynamic set's import libraries
+        # (short-import members) would trip up llvm-objcopy and aren't bloated.
+        $objcopy = (Get-Command llvm-objcopy -ErrorAction SilentlyContinue).Source
+        if (-not $objcopy) { $objcopy = "C:\Program Files\LLVM\bin\llvm-objcopy.exe" }
+        if (-not (Test-Path $objcopy)) { choco install llvm -y; $objcopy = "C:\Program Files\LLVM\bin\llvm-objcopy.exe" }
+        # Some MSVC libs carry members llvm-objcopy can't parse (e.g. LTCG/anonymous
+        # objects -> "unsupported object file format"). Don't abort on those: strip to
+        # a temp file and swap in only on success, otherwise skip (the lib stays
+        # unstripped but still links).
+        $ErrorActionPreference = "Continue"
+        $PSNativeCommandUseErrorActionPreference = $false
+        Get-ChildItem "static_${{ inputs.arch }}/lib" -Filter *.lib | ForEach-Object {
+          $src = $_.FullName; $tmp = "$src.stripped"
+          & $objcopy --strip-debug $src $tmp 2>$null
+          if ($LASTEXITCODE -eq 0 -and (Test-Path $tmp)) {
+            Move-Item -Force $tmp $src
+          } else {
+            if (Test-Path $tmp) { Remove-Item -Force $tmp }
+            Write-Host "skip (unsupported by llvm-objcopy): $($_.Name)"
+          }
+        }
+        exit 0
+
+    - name: Zip local
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        Push-Location "static_${{ inputs.arch }}"
+        7z a -tzip -mx=9 -snl "$env:GITHUB_WORKSPACE/static_windows_${{ inputs.arch }}.zip" include lib
+        Pop-Location
+        Push-Location "dynamic_${{ inputs.arch }}"
+        7z a -tzip -mx=9 -snl "$env:GITHUB_WORKSPACE/dynamic_windows_${{ inputs.arch }}.zip" include lib
+        Pop-Location
+
+    - name: Save artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries-windows-${{ inputs.arch }}
+        path: "*.zip"

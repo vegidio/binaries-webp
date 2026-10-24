@@ -288,10 +288,10 @@ weak_externals() {
 #            (named by their content), __imp_ import thunks, names used by .drectve directives and other names
 #            starting with "." (e.g. MinGW's .weak.__cxa_pure_virtual.* aliases)
 #   prefixed carries the prefix
-#   refptr   MinGW .refptr.<target>, a COMDAT keyed by its name that holds the address of <target>. It must follow
-#            its target: if the target is renamed and the .refptr kept its name, the linker would fold the bundle's
-#            .refptr with the one of another copy and one of them would point to the wrong copy. A .refptr to a symbol
-#            the bundle doesn't own (C++ runtime, public API) is "special".
+#   refptr   MinGW .refptr.<target>, a COMDAT keyed by its name that holds the address of <target>. It must be renamed
+#            when its target is: if it kept its name, the linker would fold the bundle's .refptr with the one of another
+#            copy and one of them would point to the wrong copy (see the rename map for the new name). A .refptr to a
+#            symbol the bundle doesn't own (C++ runtime, public API) is "special".
 #   private  everything else: gets the prefix
 classify() {
   awk -v fmt="$FORMAT" -v pub="$PUBLIC_REGEX" -v prefix="$PREFIX" -v dfile="$1" -v ofile="$2" '
@@ -439,7 +439,14 @@ grep -q "^prefixed " closure.classes && die "the input already contains prefixed
 [ -z "$PUBLIC_REGEX" ] || grep -q "^public " closure.classes || die "no public symbols found (PUBLIC_REGEX=$PUBLIC_REGEX)"
 
 # OLD NEW, NEW being prefix + OLD, except on Mach-O where the prefix goes after the leading "_" (_WebPDecode ->
-# _webprs_WebPDecode) so the C-level name stays valid. A .refptr.<target> and a weak external follow their target.
+# _webprs_WebPDecode) so the C-level name stays valid. A weak external follows its target.
+#
+# A .refptr.<target> becomes <prefix>.refptr.<target>, NOT .refptr.<prefix><target>. llvm-objcopy can't rename COFF
+# sections, so its COMDAT section keeps the name .rdata$.refptr.<target>. GNU ld merges two COMDATs only when both
+# their symbol and their section name match, so with .refptr.<prefix><target> the bundle's copy would clash with
+# the correctly named one (.rdata$.refptr.<prefix><target>) that gcc emits in any program taking the address of a
+# bundle function: "multiple definition of .refptr.webprs_...". A symbol name gcc never generates can't clash with
+# anything, and the bundle's own copies still merge, since they all agree on both names.
 awk -v fmt="$FORMAT" -v prefix="$PREFIX" '
   function renamed(n) { return (fmt == "macho" && substr(n, 1, 1) == "_") ? "_" prefix substr(n, 2) : prefix n }
   FNR == 1 { file++ }
@@ -448,7 +455,7 @@ awk -v fmt="$FORMAT" -v prefix="$PREFIX" '
   file == 1 { defined[$2] = 1 }
   file == 2 { alias[$1] = $2 }
   END {
-    for (r in refptr) if (refptr[r] in new) new[r] = ".refptr." new[refptr[r]]
+    for (r in refptr) if (refptr[r] in new) new[r] = prefix r
     for (a in alias) if (!(a in defined) && (alias[a] in new)) new[a] = renamed(a)
     for (n in new) print n, new[n]
   }' closure.classes weak.pairs | LC_ALL=C sort > rename.map
